@@ -16,3 +16,9 @@ docs/participant_release_checklist.md
 tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
+# Local planning document; do not include in the public submission repository.
+PRD_TRACK4_SHOPPING_COPILOT.md
+
+.venv/
+data/catalog.jsonl.gz
+
