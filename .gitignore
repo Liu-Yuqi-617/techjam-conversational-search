@@ -22,3 +22,4 @@ PRD_TRACK4_SHOPPING_COPILOT.md
 .venv/
 data/catalog.jsonl.gz
 
+results.iteration*.json
