@@ -15,6 +15,9 @@ SIZES = ("xxs", "xs", "small", "medium", "large", "xl", "xxl", "wide", "narrow",
 USE_CASES = ("running", "hiking", "walking", "gym", "work", "winter", "outdoor", "rain", "wedding", "travel", "casual", "party", "yoga", "swimming")
 FEATURES = ("waterproof", "water resistant", "breathable", "comfortable", "lightweight", "durable", "warm", "insulated", "stretch", "support", "quick dry", "uv protection")
 CATEGORIES = ("shoe", "shoes", "boot", "boots", "sandal", "sandals", "sneaker", "sneakers", "shirt", "shirts", "jacket", "coat", "dress", "dresses", "jeans", "pants", "shorts", "skirt", "bra", "earring", "earrings", "necklace", "ring", "watch", "bag", "handbag", "backpack", "belt", "sock", "socks", "hat", "cap", "glove", "gloves", "swimsuit")
+OVERRIDE_RE = re.compile(r"\b(?:actually|instead|change\s+(?:of\s+)?plan|ignore\s+(?:my\s+)?earlier|now\s+(?:i\s+)?need)\b", re.I)
+BUYING_RE = re.compile(r"\b(?:need|buy|purchase|must have|looking for|want)\b", re.I)
+BROWSING_RE = re.compile(r"\b(?:explor(?:e|ing)|browse|just looking|show me|ideas|options)\b", re.I)
 
 
 def _text(value: object) -> str:
@@ -70,14 +73,17 @@ class Agent:
 
     def _extract(self, state: SessionState, message: str, turn: int) -> None:
         text = message.lower(); state.query_history.append(message)
+        is_override = bool(OVERRIDE_RE.search(text))
+        if is_override:
+            state.deactivate_for_override(turn)
+            state.debug_events.append({"turn": turn, "event": "override", "reason": "explicit override signal"})
         # `goal` is a normalized current-turn slot, not a concatenation of history.
         # It keeps category/detail words that do not belong to one of the fixed
         # attribute dictionaries while all earlier constraints remain in slots.
         normalized_goal = _terms(text)
         if normalized_goal:
             self._set(state, "goal", normalized_goal, turn)
-        if any(word in text for word in ("need", "buy", "looking for", "want")):
-            state.intent = "buying"
+        self._route(state, text, turn)
         boundary = re.search(r"(?:no|don't have|do not have|without) (?:a |any )?(?:preference|preference for)?\s*(?:for )?(category|material|color|size|style|brand|budget|feature|use case)", text)
         if boundary:
             state.slots[boundary.group(1).replace(" ", "_")] = Slot(status="unconstrained", source_turn=turn, confidence=1.0, explicit=True)
@@ -93,6 +99,24 @@ class Agent:
         if brand and state.slots["brand"].status != "unconstrained": self._set(state, "brand", brand.group(1).strip(), turn, level="hard")
         for style in ("formal", "sporty", "classic", "fashion", "regular fit", "slim fit", "oversized"):
             if style in text: self._set(state, "style", style, turn)
+
+    @staticmethod
+    def _route(state: SessionState, text: str, turn: int) -> None:
+        """Route without withholding recommendations; debug remains session-local."""
+        active_hard = sum(slot.status == "active" and slot.level == "hard" for slot in state.slots.values())
+        category_known = state.slots["category"].status == "active"
+        if BROWSING_RE.search(text) and not (BUYING_RE.search(text) and active_hard >= 2):
+            route, reason = "browsing", "explicit exploration language"
+        elif BUYING_RE.search(text) or active_hard >= 2:
+            route, reason = "buying", "purchase language or multiple hard constraints"
+        elif category_known:
+            route, reason = "browsing", "category known but no purchase commitment"
+        else:
+            route, reason = "browsing", "insufficient constraints"
+        state.intent = route
+        state.route = route
+        state.route_reason = reason
+        state.debug_events.append({"turn": turn, "event": "route", "route": route, "reason": reason})
 
     def _retrieve(self, state: SessionState, top_k: int) -> list[dict]:
         terms = list(dict.fromkeys(_terms(" ".join(state.active_values()))))[:40]
@@ -120,8 +144,33 @@ class Agent:
             if len(result) == limit: break
         return result
 
+    @staticmethod
+    def _next_question(state: SessionState, turn: int, recommendations: list[dict]) -> str | None:
+        """Ask one useful, unanswered field; never revisit an unconstrained field."""
+        if turn >= 8 or not recommendations:
+            return None
+        # Browsing needs early narrowing; buying uses the same policy only while
+        # material constraints are still sparse.  This still returns Top-K now.
+        order = ("feature", "material", "color", "use_case", "size", "budget", "style", "brand")
+        for attribute in order:
+            slot = state.slots[attribute]
+            if slot.status in {"active", "unconstrained"} or attribute in state.asked_attributes:
+                continue
+            state.asked_attributes.add(attribute)
+            return attribute
+        return None
+
+    @staticmethod
+    def _question_message(attribute: str | None, route: str) -> str:
+        if not attribute:
+            return "Here are the closest matches based on your current preferences."
+        labels = {"feature": "feature", "use_case": "intended use", "budget": "budget", "color": "color", "material": "material", "size": "size", "style": "style", "brand": "brand"}
+        prefix = "While you browse" if route == "browsing" else "To refine these options"
+        return f"{prefix}, do you have a preference for {labels[attribute]}?"
+
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         if session_id not in self.sessions: raise RuntimeError("reset must be called before respond")
         state = self.sessions[session_id]; self._extract(state, user_message or "", turn)
         recommendations = self._retrieve(state, top_k); state.recommended_asins.update(item["parent_asin"] for item in recommendations)
-        return {"message": "Here are the closest matches based on your current preferences.", "ask_attribute": None, "recommendations": recommendations, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+        ask_attribute = self._next_question(state, turn, recommendations)
+        return {"message": self._question_message(ask_attribute, state.route), "ask_attribute": ask_attribute, "recommendations": recommendations, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}

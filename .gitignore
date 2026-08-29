@@ -1,10 +1,38 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+.venv/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets and machine-specific configuration.  Keep a checked-in .env.example
+# if one is added later, but never commit a usable credential file.
 .env
-results.json
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# Supplied catalog/evaluation data and generated local indexes are not part of
+# the submission bundle.  Keep data/README.md as the acquisition guide.
 data/catalog.jsonl
+data/catalog.jsonl.gz
+data/public_set.jsonl
 data/releases/
+*.sqlite
+*.sqlite3
+*.db
+
+# Local evaluator output and experiment artifacts are reproducible and must
+# not be submitted as source.
+results*.json
+*.prof
+*.log
+
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
 secure/
@@ -15,11 +43,5 @@ docs/participant_release_checklist.md
 # Organizer-only pipeline tests.
 tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
-*.log
 # Local planning document; do not include in the public submission repository.
 PRD_TRACK4_SHOPPING_COPILOT.md
-
-.venv/
-data/catalog.jsonl.gz
-
-results.iteration*.json
