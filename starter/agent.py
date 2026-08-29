@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
 
+from starter.llm import OllamaPlanner
 from starter.state import SessionState, Slot
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.I)
@@ -41,10 +43,12 @@ def _matches(text: str, values: tuple[str, ...]) -> list[str]:
 class Agent:
     """Deterministic, offline FTS5 retrieval with per-session English slot state."""
 
-    def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
+    def __init__(self, catalog_path: str | Path = "data/catalog.jsonl", *, llm_planner: OllamaPlanner | None = None) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self.sessions: dict[str, SessionState] = {}
+        self.llm_planner = llm_planner or OllamaPlanner()
+        self.profile_weight = float(os.getenv("SHOPPING_PROFILE_WEIGHT", "0"))
         self._build_index()
 
     def _build_index(self) -> None:
@@ -62,7 +66,13 @@ class Agent:
         self.connection.commit()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
-        self.sessions[session_id] = SessionState()
+        state = SessionState()
+        # Profile is a soft, opt-in quality signal and never a slot constraint.
+        # It remains off in the frozen default after its public-set ablation.
+        if self.profile_weight > 0 and isinstance(user_profile, dict):
+            state.profile_terms = _terms(" ".join(_text(value) for value in (
+                user_profile.get("preference_tags", []), user_profile.get("summary", ""))))[:20]
+        self.sessions[session_id] = state
 
     @staticmethod
     def _set(state: SessionState, name: str, value: object, turn: int, operator: str = "eq", level: str = "soft") -> None:
@@ -74,6 +84,7 @@ class Agent:
     def _extract(self, state: SessionState, message: str, turn: int) -> None:
         text = message.lower(); state.query_history.append(message)
         is_override = bool(OVERRIDE_RE.search(text))
+        inherited_category = state.slots["category"].value if state.slots["category"].status == "active" else None
         if is_override:
             state.deactivate_for_override(turn)
             state.debug_events.append({"turn": turn, "event": "override", "reason": "explicit override signal"})
@@ -91,6 +102,11 @@ class Agent:
             found = _matches(text, words)
             if found and state.slots[name].status != "unconstrained":
                 self._set(state, name, found if len(found) > 1 else found[0], turn, level=level)
+        # "Actually I need it in black" replaces colour, not necessarily the
+        # product class. Keep the prior class as a non-explicit soft hint only
+        # when the replacement message does not name a new class.
+        if is_override and inherited_category and state.slots["category"].status != "active":
+            self._set(state, "category", inherited_category, turn, level="soft")
         for pattern, operator in ((r"(?:under|below|less than|up to|at most|<=)\s*\$?\s*(\d+(?:\.\d{1,2})?)", "lte"), (r"(?:over|above|more than|at least|>=)\s*\$?\s*(\d+(?:\.\d{1,2})?)", "gte"), (r"\$\s*(\d+(?:\.\d{1,2})?)", "eq")):
             match = re.search(pattern, text)
             if match:
@@ -99,6 +115,29 @@ class Agent:
         if brand and state.slots["brand"].status != "unconstrained": self._set(state, "brand", brand.group(1).strip(), turn, level="hard")
         for style in ("formal", "sporty", "classic", "fashion", "regular fit", "slim fit", "oversized"):
             if style in text: self._set(state, "style", style, turn)
+
+    def _apply_llm_plan(self, state: SessionState, message: str, turn: int) -> str | None:
+        """Merge only supplemental soft LLM signals after deterministic extraction."""
+        state_view = {name: slot.value for name, slot in state.slots.items() if slot.status == "active"}
+        result = self.llm_planner.plan(message, {"intent": state.intent, "slots": state_view})
+        state.llm_prompt_tokens += result.prompt_tokens
+        state.llm_completion_tokens += result.completion_tokens
+        if result.failure:
+            state.debug_events.append({"turn": turn, "event": "llm_fallback", "reason": result.failure, "latency_ms": result.latency_ms})
+            return None
+        plan = result.payload or {}
+        if plan.get("override"):
+            state.deactivate_prior_to(turn)
+            state.debug_events.append({"turn": turn, "event": "llm_override"})
+        # Explicit rules are authoritative. LLM fills only empty soft slots.
+        for name, value in plan.get("slots", {}).items():
+            if name in state.slots and state.slots[name].status == "empty":
+                self._set(state, name, value, turn, level="soft")
+        if state.route_reason == "insufficient constraints" and plan.get("intent") in {"buying", "browsing"}:
+            state.intent = state.route = plan["intent"]
+        state.debug_events.append({"turn": turn, "event": "llm_plan", "latency_ms": result.latency_ms})
+        asked = plan.get("ask_attribute")
+        return asked if isinstance(asked, str) else None
 
     @staticmethod
     def _route(state: SessionState, text: str, turn: int) -> None:
@@ -126,16 +165,41 @@ class Agent:
         # Without this ORDER BY, SQLite is free to return arbitrary rowids for LIMIT.
         rows = self.connection.execute("SELECT parent_asin, title, categories, features, details, store, description, price, rating, rating_count, bm25(products, 8.0, 5.0, 3.5, 2.5, 1.5, 1.0, 1.0, 0.0, 0.0, 0.0) AS lexical FROM products WHERE products MATCH ? ORDER BY lexical LIMIT 120", (expression,)).fetchall()
         budget = state.slots["budget"]; scored: list[tuple[float, str]] = []
+        # This is deliberately calculated from the retrieved candidate pool,
+        # not from labels or evaluator state.  It estimates which unanswered
+        # attribute would split the live search space most effectively.
+        coverage_counts = {"feature": 0, "material": 0, "color": 0,
+                           "use_case": 0, "size": 0, "style": 0,
+                           "brand": 0, "budget": 0}
+        eligible_rows = 0
         for row in rows:
             asin, *fields, price, rating, rating_count, lexical = row
             if budget.status == "active" and price is not None and ((budget.operator == "lte" and float(price) > float(budget.value)) or (budget.operator == "gte" and float(price) < float(budget.value))): continue
             corpus = " ".join(_text(field).lower() for field in fields)
+            eligible_rows += 1
+            for attribute, values in (("feature", FEATURES), ("material", MATERIALS),
+                                      ("color", COLORS), ("use_case", USE_CASES),
+                                      ("size", SIZES)):
+                # Values are a fixed, normalized vocabulary; direct membership
+                # avoids recompiling dozens of regular expressions per row.
+                if any(value in corpus for value in values):
+                    coverage_counts[attribute] += 1
+            if any(word in corpus for word in ("formal", "sporty", "classic", "fashion", "slim fit", "oversized")):
+                coverage_counts["style"] += 1
+            if str(row[5]).strip():
+                coverage_counts["brand"] += 1
+            if price is not None:
+                coverage_counts["budget"] += 1
             category_bonus = 0.0; category = state.slots["category"]
             if category.status == "active":
                 wanted = category.value if isinstance(category.value, list) else [category.value]
                 category_bonus = 4.0 * sum(str(word).lower() in _text(row[2]).lower() for word in wanted)
-            score = -float(lexical) + 1.5 * sum(term in corpus for term in terms) + category_bonus + .05 * float(rating or 0) + min(float(rating_count or 0), 10000) / 100000
+            profile_bonus = self.profile_weight * sum(term in corpus for term in state.profile_terms)
+            score = -float(lexical) + 1.5 * sum(term in corpus for term in terms) + category_bonus + profile_bonus + .05 * float(rating or 0) + min(float(rating_count or 0), 10000) / 100000
             scored.append((score, str(asin)))
+        state.candidate_attribute_coverage = {
+            attribute: count / eligible_rows for attribute, count in coverage_counts.items()
+        } if eligible_rows else {}
         scored.sort(key=lambda item: (-item[0], item[1]))
         limit = max(0, min(top_k, 10)); seen: set[str] = set(); result: list[dict] = []
         for _, asin in scored:
@@ -146,19 +210,31 @@ class Agent:
 
     @staticmethod
     def _next_question(state: SessionState, turn: int, recommendations: list[dict]) -> str | None:
-        """Ask one useful, unanswered field; never revisit an unconstrained field."""
+        """Select one unanswered attribute by deterministic candidate split value."""
         if turn >= 8 or not recommendations:
             return None
-        # Browsing needs early narrowing; buying uses the same policy only while
-        # material constraints are still sparse.  This still returns Top-K now.
+        # Coverage close to 50% yields the best binary split.  Attributes seen
+        # in nearly every/no candidate have low information value.  The small
+        # fixed preference is a stable answer-cost tie-break, not a label-based
+        # heuristic.  Asked/unconstrained/current attributes are ineligible.
         order = ("feature", "material", "color", "use_case", "size", "budget", "style", "brand")
-        for attribute in order:
+        candidates: list[tuple[float, int, str]] = []
+        for position, attribute in enumerate(order):
             slot = state.slots[attribute]
             if slot.status in {"active", "unconstrained"} or attribute in state.asked_attributes:
                 continue
-            state.asked_attributes.add(attribute)
-            return attribute
-        return None
+            coverage = state.candidate_attribute_coverage.get(attribute, 0.0)
+            split_value = 1.0 - abs(0.5 - coverage) * 2.0
+            # Below 5% coverage a question is effectively a dead end.
+            if coverage >= 0.05:
+                candidates.append((split_value, -position, attribute))
+        if not candidates:
+            return None
+        attribute = max(candidates)[2]
+        state.asked_attributes.add(attribute)
+        state.debug_events.append({"turn": turn, "event": "clarification", "attribute": attribute,
+                                   "coverage": round(state.candidate_attribute_coverage[attribute], 4)})
+        return attribute
 
     @staticmethod
     def _question_message(attribute: str | None, route: str) -> str:
@@ -171,6 +247,13 @@ class Agent:
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         if session_id not in self.sessions: raise RuntimeError("reset must be called before respond")
         state = self.sessions[session_id]; self._extract(state, user_message or "", turn)
+        prompt_tokens_before = state.llm_prompt_tokens
+        completion_tokens_before = state.llm_completion_tokens
+        llm_ask_attribute = self._apply_llm_plan(state, user_message or "", turn)
         recommendations = self._retrieve(state, top_k); state.recommended_asins.update(item["parent_asin"] for item in recommendations)
         ask_attribute = self._next_question(state, turn, recommendations)
-        return {"message": self._question_message(ask_attribute, state.route), "ask_attribute": ask_attribute, "recommendations": recommendations, "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+        # The model may propose a clarification only when the deterministic
+        # policy considers it safe, unanswered, and useful.
+        if llm_ask_attribute and ask_attribute and llm_ask_attribute == ask_attribute:
+            state.debug_events.append({"turn": turn, "event": "llm_clarification_accepted", "attribute": ask_attribute})
+        return {"message": self._question_message(ask_attribute, state.route), "ask_attribute": ask_attribute, "recommendations": recommendations, "usage": {"prompt_tokens": state.llm_prompt_tokens - prompt_tokens_before, "completion_tokens": state.llm_completion_tokens - completion_tokens_before}}

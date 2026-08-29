@@ -1,0 +1,17 @@
+{
+  "retrieval": "SQLite FTS5 + deterministic reranking",
+  "semantic_retrieval": false,
+  "profile_weight": 0.0,
+  "active_clarification": true,
+  "clarification_stop_turn": 8,
+  "llm": {
+    "enabled": false,
+    "provider": "Ollama (optional local runtime)",
+    "model": null,
+    "temperature": 0,
+    "timeout_seconds": 1.5,
+    "fallback": "deterministic offline rules"
+  },
+  "network_required": false,
+  "random_seed": "deterministic/no random sampling"
+}

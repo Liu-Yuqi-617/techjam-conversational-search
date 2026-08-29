@@ -25,7 +25,11 @@ class SessionState:
     asked_attributes: set[str] = field(default_factory=set)
     route: str = "unknown"
     route_reason: str = ""
+    candidate_attribute_coverage: dict[str, float] = field(default_factory=dict)
     debug_events: list[dict[str, object]] = field(default_factory=list)
+    llm_prompt_tokens: int = 0
+    llm_completion_tokens: int = 0
+    profile_terms: list[str] = field(default_factory=list)
 
     def active_values(self) -> list[str]:
         result: list[str] = []
@@ -41,5 +45,12 @@ class SessionState:
                 slot.status = "replaced"
                 # Keep the history on the old record while making the current
                 # state unambiguously queryable through active_values().
+                self.slots[name] = Slot(status="replaced", source_turn=slot.source_turn,
+                                        confidence=slot.confidence, explicit=slot.explicit)
+
+    def deactivate_prior_to(self, turn: int) -> None:
+        """Apply a validated model override without discarding this turn's rules."""
+        for name, slot in self.slots.items():
+            if slot.status == "active" and slot.source_turn is not None and slot.source_turn < turn:
                 self.slots[name] = Slot(status="replaced", source_turn=slot.source_turn,
                                         confidence=slot.confidence, explicit=slot.explicit)

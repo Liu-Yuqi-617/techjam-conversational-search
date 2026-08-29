@@ -43,6 +43,21 @@ python3 -m evaluator.local_evaluator
 Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
 The command writes per-session results and aggregate metrics to `results.json`.
 
+### Reproducible local environment
+
+The agent has no third-party runtime dependencies. Create a virtual environment and use its Python executable:
+
+```powershell
+python -m venv --clear .venv
+# MSYS2 Python (this workstation)
+.\.venv\bin\python.exe -m unittest discover -s tests -v
+.\.venv\bin\python.exe -m evaluator.local_evaluator --output results.json
+
+# Standard Windows CPython uses .\.venv\Scripts\python.exe instead.
+```
+
+The default configuration is fully offline. An optional, local-only Ollama planner can be enabled for a separately measured experiment by copying `.env.example` to a private `.env`-style configuration and setting `SHOPPING_LLM_ENABLED=1` and a local model name. It has a 1.5-second timeout and always falls back to deterministic rules; it is disabled in the frozen submission configuration in `docs/final_config.json`.
+
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 

@@ -53,6 +53,16 @@ class IterationThreeAndFourTests(unittest.TestCase):
         self.assertNotIn("blue", state.active_values())
         self.assertNotIn("cotton", state.active_values())
 
+    def test_override_keeps_product_class_when_only_an_attribute_changes(self) -> None:
+        agent = self.agent(); agent.reset("partial-override", {})
+        agent.respond("partial-override", "I need blue shoes", 1, 10)
+        agent.respond("partial-override", "Actually, I need black instead.", 2, 10)
+        state = agent.sessions["partial-override"]
+        self.assertEqual(state.slots["category"].value, "shoes")
+        self.assertEqual(state.slots["category"].level, "soft")
+        self.assertEqual(state.slots["color"].value, "black")
+
+
     def test_boundary_does_not_repeat_questioned_attribute(self) -> None:
         agent = self.agent(); agent.reset("boundary", {})
         first = agent.respond("boundary", "I'm browsing shoes", 1, 10)
@@ -62,3 +72,12 @@ class IterationThreeAndFourTests(unittest.TestCase):
         self.assertNotEqual(second["ask_attribute"], attribute)
         self.assertEqual(agent.sessions["boundary"].slots[attribute].status, "unconstrained")
 
+    def test_clarification_uses_candidate_split_and_stops_at_turn_eight(self) -> None:
+        agent = self.agent(); agent.reset("split", {})
+        early = agent.respond("split", "I'm browsing shoes", 1, 10)
+        state = agent.sessions["split"]
+        self.assertIsNotNone(early["ask_attribute"])
+        self.assertIn(early["ask_attribute"], state.candidate_attribute_coverage)
+        self.assertGreaterEqual(state.candidate_attribute_coverage[early["ask_attribute"]], 0.05)
+        late = agent.respond("split", "Please show more options", 8, 10)
+        self.assertIsNone(late["ask_attribute"])
