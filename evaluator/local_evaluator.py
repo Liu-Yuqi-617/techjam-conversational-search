@@ -6,7 +6,7 @@ import random
 import re
 import statistics
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from starter.agent import Agent
@@ -223,6 +223,7 @@ def evaluate(
     sessions: list[dict] = []
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    llm_failures: Counter[str] = Counter()
     for sample in samples:
         session_id = f"public_{uuid.uuid4().hex}"
         agent.reset(session_id, sample["user_profile"])
@@ -236,6 +237,8 @@ def evaluate(
         hit_turn: int | None = None
         best_rank: int | None = None
         for turn in range(1, MAX_TURNS + 1):
+            state = agent.sessions.get(session_id) if hasattr(agent, "sessions") else None
+            event_count = len(state.debug_events) if state is not None else 0
             try:
                 response = agent.respond(session_id, user_message, turn, TOP_K)
             except Exception:
@@ -248,6 +251,10 @@ def evaluate(
                     total_prompt_tokens += usage["prompt_tokens"]
                 if isinstance(usage.get("completion_tokens"), int) and usage["completion_tokens"] >= 0:
                     total_completion_tokens += usage["completion_tokens"]
+            if state is not None:
+                for event in state.debug_events[event_count:]:
+                    if event.get("event") == "llm_fallback":
+                        llm_failures[str(event.get("reason", "unknown"))] += 1
             ranked = normalize_recommendations(response.get("recommendations"), catalog_ids)
             if override_applied and target in ranked:
                 best_rank = ranked.index(target) + 1
@@ -290,6 +297,7 @@ def evaluate(
             "completion_tokens": total_completion_tokens,
             "total_tokens": total_prompt_tokens + total_completion_tokens,
         },
+        "llm_fallbacks": dict(sorted(llm_failures.items())),
         "scenario_metrics": {name: metric_summary(grouped[name]) for name in sorted(grouped)},
         "sessions": sessions,
     }
@@ -300,8 +308,14 @@ def main() -> None:
     parser.add_argument("--catalog", default="data/catalog.jsonl")
     parser.add_argument("--dataset", default="data/public_set.jsonl")
     parser.add_argument("--output", default="results.json")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Evaluate only the first N public samples for a fast local experiment.")
     args = parser.parse_args()
     samples = load_jsonl(args.dataset)
+    if args.max_samples is not None:
+        if args.max_samples < 1:
+            parser.error("--max-samples must be at least 1")
+        samples = samples[:args.max_samples]
     catalog_ids, categories, products = catalog_index(args.catalog)
     result = evaluate(Agent(args.catalog), samples, catalog_ids, categories, products)
     Path(args.output).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")

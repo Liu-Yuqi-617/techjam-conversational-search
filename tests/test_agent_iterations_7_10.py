@@ -42,14 +42,14 @@ class IterationSevenToTenTests(unittest.TestCase):
         self.assertEqual(response["usage"], {"prompt_tokens": 0, "completion_tokens": 0})
         self.assertIn("llm_fallback", [event["event"] for event in agent.sessions["offline"].debug_events])
 
-    def test_llm_can_fill_an_empty_soft_slot_but_cannot_replace_hard_rule(self) -> None:
+    def test_llm_cannot_replace_rules_or_invent_a_soft_slot(self) -> None:
         planner = FakePlanner(PlannerResult({"intent": "browsing", "slots": {"color": "red", "feature": "lightweight"}}, 7, 3))
         agent = Agent(self.catalog, llm_planner=planner)
         agent.reset("merge", {})
         response = agent.respond("merge", "I need blue shoes", 1, 10)
         state = agent.sessions["merge"]
         self.assertEqual(state.slots["color"].value, "blue")
-        self.assertEqual(state.slots["feature"].value, "lightweight")
+        self.assertIsNone(state.slots["feature"].value)
         self.assertEqual(response["usage"], {"prompt_tokens": 7, "completion_tokens": 3})
 
     def test_usage_is_reported_once_per_turn(self) -> None:
@@ -65,6 +65,11 @@ class IterationSevenToTenTests(unittest.TestCase):
         self.assertIsNone(OllamaPlanner._validate({"recommendations": ["BLUE"]}))
         self.assertIsNone(OllamaPlanner._validate({"slots": {"parent_asin": "BLUE"}}))
         self.assertIsNone(OllamaPlanner._validate({"ask_attribute": "price"}))
+
+    def test_llm_schema_keeps_allowlisted_slots_when_model_adds_noise(self) -> None:
+        self.assertEqual(OllamaPlanner._validate({
+            "slots": {"color": "blue", "parent_asin": "do-not-use"},
+        }), {"slots": {"color": "blue"}})
 
     def test_empty_message_and_sessions_remain_isolated(self) -> None:
         agent = Agent(self.catalog, llm_planner=FakePlanner(PlannerResult(None, failure="disabled")))

@@ -1,11 +1,25 @@
 __pycache__/
 *.py[cod]
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 .DS_Store
+.idea/
+.vscode/
 .venv/
 .pytest_cache/
 .coverage
 coverage.xml
 htmlcov/
+
+# Python packaging and local build outputs.
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
 
 # Secrets and machine-specific configuration.  Keep a checked-in .env.example
 # if one is added later, but never commit a usable credential file.

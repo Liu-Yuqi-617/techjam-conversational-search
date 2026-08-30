@@ -117,7 +117,7 @@ class Agent:
             if style in text: self._set(state, "style", style, turn)
 
     def _apply_llm_plan(self, state: SessionState, message: str, turn: int) -> str | None:
-        """Merge only supplemental soft LLM signals after deterministic extraction."""
+        """Merge only literal supplemental soft LLM signals after rule extraction."""
         state_view = {name: slot.value for name, slot in state.slots.items() if slot.status == "active"}
         result = self.llm_planner.plan(message, {"intent": state.intent, "slots": state_view})
         state.llm_prompt_tokens += result.prompt_tokens
@@ -126,18 +126,19 @@ class Agent:
             state.debug_events.append({"turn": turn, "event": "llm_fallback", "reason": result.failure, "latency_ms": result.latency_ms})
             return None
         plan = result.payload or {}
-        if plan.get("override"):
-            state.deactivate_prior_to(turn)
-            state.debug_events.append({"turn": turn, "event": "llm_override"})
-        # Explicit rules are authoritative. LLM fills only empty soft slots.
+        # Intent and explicit overrides are deliberately rule-only: a small
+        # local model must never discard the search context. It may only fill
+        # an empty supplemental slot using words present in this message.
+        normalized_message = " ".join(_terms(message))
         for name, value in plan.get("slots", {}).items():
-            if name in state.slots and state.slots[name].status == "empty":
+            normalized_value = " ".join(_terms(str(value)))
+            if (name in {"feature", "style", "brand", "use_case"}
+                    and state.slots[name].status == "empty"
+                    and normalized_value
+                    and normalized_value in normalized_message):
                 self._set(state, name, value, turn, level="soft")
-        if state.route_reason == "insufficient constraints" and plan.get("intent") in {"buying", "browsing"}:
-            state.intent = state.route = plan["intent"]
         state.debug_events.append({"turn": turn, "event": "llm_plan", "latency_ms": result.latency_ms})
-        asked = plan.get("ask_attribute")
-        return asked if isinstance(asked, str) else None
+        return None
 
     @staticmethod
     def _route(state: SessionState, text: str, turn: int) -> None:

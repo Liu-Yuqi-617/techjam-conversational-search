@@ -20,13 +20,31 @@ ALLOWED_ATTRIBUTES = frozenset({
 })
 ALLOWED_SLOTS = ALLOWED_ATTRIBUTES - {"other"}
 
-SYSTEM_PROMPT = """You are a shopping-dialogue planner. Return exactly one JSON object,
-with no markdown and no explanation. Allowed keys are intent, override, slots,
-and ask_attribute. intent is buying or browsing. override is boolean. slots is
-an object whose keys are only category, material, color, size, style, brand,
-budget, feature, use_case; each value is a short English string or number.
-ask_attribute is one allowed attribute or null. Never return product IDs,
-recommendations, or any text outside the JSON object."""
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "intent": {"type": "string", "enum": ["buying", "browsing"]},
+        "override": {"type": "boolean"},
+        "slots": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                name: {"type": ["string", "number"]} for name in sorted(ALLOWED_SLOTS)
+            },
+        },
+        "ask_attribute": {"type": ["string", "null"], "enum": [*sorted(ALLOWED_ATTRIBUTES), None]},
+    },
+}
+
+SYSTEM_PROMPT = """Return JSON only. You extract one literal supplemental detail;
+you do not recommend. The deterministic system owns intent, preference
+overrides, category/color/material/size/budget extraction, catalog ranking, and
+questions. Never set intent or override. Read state: never repeat or change an
+existing value. Put a slot only when the latest customer message explicitly
+contains an uncommon feature, style, brand, or use_case phrase missing from
+state; copy that phrase exactly. Never infer preferences. Usually return
+{"slots":{}}. Allowed slot names: feature, style, brand, use_case."""
 
 
 @dataclass(frozen=True)
@@ -58,8 +76,14 @@ class OllamaPlanner:
         body = {
             "model": self.model,
             "stream": False,
-            "format": "json",
-            "options": {"temperature": 0},
+            # Prevent Qwen from returning a JSON wrapper or unsupported field.
+            "format": RESPONSE_SCHEMA,
+            # Qwen3's optional reasoning output adds latency and can consume
+            # the whole per-turn timeout before it emits a useful JSON object.
+            "think": False,
+            # Keep the local planner's JSON response short. This bounds decode
+            # time on small CPU-hosted Qwen models without changing retrieval.
+            "options": {"temperature": 0, "num_predict": 80},
             "system": SYSTEM_PROMPT,
             "prompt": json.dumps({"customer_message": message[:2000], "state": state}, ensure_ascii=True),
         }
@@ -75,7 +99,9 @@ class OllamaPlanner:
             validated = self._validate(payload)
             elapsed = round((time.perf_counter() - started) * 1000)
             if validated is None:
-                return PlannerResult(None, latency_ms=elapsed, failure="invalid_json_schema")
+                return PlannerResult(None, int(raw.get("prompt_eval_count") or 0),
+                                     int(raw.get("eval_count") or 0), elapsed,
+                                     "invalid_json_schema")
             return PlannerResult(validated, int(raw.get("prompt_eval_count") or 0),
                                  int(raw.get("eval_count") or 0), elapsed)
         except Exception as exc:  # Network/model errors must never interrupt an agent turn.
@@ -99,11 +125,16 @@ class OllamaPlanner:
             result["override"] = override
         slots = value.get("slots")
         if slots is not None:
-            if not isinstance(slots, dict) or set(slots) - ALLOWED_SLOTS:
+            if not isinstance(slots, dict):
                 return None
+            # Some small models add an irrelevant slot even under a schema.
+            # Retain the useful, allow-listed subset rather than throwing away
+            # the entire plan. An object containing only unsafe/unknown slots
+            # still fails validation below.
             clean_slots = {key: item for key, item in slots.items()
-                           if isinstance(item, (str, int, float)) and str(item).strip()}
-            if len(clean_slots) != len(slots):
+                           if key in ALLOWED_SLOTS
+                           and isinstance(item, (str, int, float)) and str(item).strip()}
+            if slots and not clean_slots:
                 return None
             result["slots"] = clean_slots
         asked = value.get("ask_attribute")
