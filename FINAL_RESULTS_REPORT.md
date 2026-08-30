@@ -57,7 +57,7 @@ build and runtime:
 $env:SHOPPING_LLM_ENABLED='1'
 $env:SHOPPING_LLM_MODEL='qwen3:1.7b'
 $env:OLLAMA_HOST='http://127.0.0.1:11434'
-$env:SHOPPING_LLM_TIMEOUT_SECONDS='1.5'
+$env:SHOPPING_LLM_TIMEOUT_SECONDS='10'
 .\.venv\bin\python.exe -m evaluator.local_evaluator --output results.qwen3-1.7b.literal-supplement.200.repro.json
 ```
 
@@ -66,15 +66,6 @@ including at temperature zero. Record `ollama list`, the model digest, hardware,
 and fallback count alongside any new LLM run. The stored LLM artifact was not
 re-run during this verification.
 
-## Submission note
-
-The two raw JSON artifacts remain unchanged in the repository root. They are
-intentionally ignored by Git as generated evaluation outputs; upload the exact
-files named above with this report when the submission portal accepts result
-artifacts.
-
 ## Team contributions
 
-Add the team-member names and their specific responsibilities here before
-final submission. The competition requires this disclosure, and no names or
-attributions are inferred in this report.
+Solo participant.
