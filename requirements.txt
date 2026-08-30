@@ -1,0 +1,2 @@
+# The required runtime uses Python 3.10+ and its standard library only.
+# No third-party packages are required for the deterministic submission.

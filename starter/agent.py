@@ -23,6 +23,7 @@ BROWSING_RE = re.compile(r"\b(?:explor(?:e|ing)|browse|just looking|show me|idea
 
 
 def _text(value: object) -> str:
+    """Flatten catalog fields so structured metadata is searchable by FTS."""
     if value is None:
         return ""
     if isinstance(value, dict):
@@ -33,10 +34,12 @@ def _text(value: object) -> str:
 
 
 def _terms(text: str) -> list[str]:
+    """Normalize user text into stable, non-trivial lexical retrieval terms."""
     return [term.lower() for term in TOKEN_RE.findall(text) if len(term) > 1 and term.lower() not in STOPWORDS]
 
 
 def _matches(text: str, values: tuple[str, ...]) -> list[str]:
+    """Return vocabulary entries that occur as complete words in the message."""
     return [word for word in values if re.search(r"(?<![a-z])" + re.escape(word) + r"(?![a-z])", text.lower())]
 
 
@@ -52,6 +55,7 @@ class Agent:
         self._build_index()
 
     def _build_index(self) -> None:
+        """Build an in-memory FTS5 index from allowed catalog metadata only."""
         cursor = self.connection.cursor()
         cursor.execute("CREATE VIRTUAL TABLE products USING fts5(parent_asin UNINDEXED, title, categories, features, details, store, description, price UNINDEXED, rating UNINDEXED, rating_count UNINDEXED, tokenize='unicode61 remove_diacritics 2')")
         batch: list[tuple[object, ...]] = []
@@ -66,6 +70,7 @@ class Agent:
         self.connection.commit()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
+        """Start an isolated session and optionally retain safe profile terms."""
         state = SessionState()
         # Profile is a soft, opt-in quality signal and never a slot constraint.
         # It remains off in the frozen default after its public-set ablation.
@@ -76,12 +81,14 @@ class Agent:
 
     @staticmethod
     def _set(state: SessionState, name: str, value: object, turn: int, operator: str = "eq", level: str = "soft") -> None:
+        """Replace one active slot with an explicit value from the current turn."""
         old = state.slots[name]
         if old.status == "active" and old.value != value:
             old.status = "replaced"
         state.slots[name] = Slot(value=value, operator=operator, level=level, status="active", source_turn=turn, confidence=1.0, explicit=True)
 
     def _extract(self, state: SessionState, message: str, turn: int) -> None:
+        """Update rule-owned slots, boundaries, and explicit overrides in order."""
         text = message.lower(); state.query_history.append(message)
         is_override = bool(OVERRIDE_RE.search(text))
         inherited_category = state.slots["category"].value if state.slots["category"].status == "active" else None
@@ -159,6 +166,7 @@ class Agent:
         state.debug_events.append({"turn": turn, "event": "route", "route": route, "reason": reason})
 
     def _retrieve(self, state: SessionState, top_k: int) -> list[dict]:
+        """Retrieve a bounded FTS candidate set and return a stable valid Top-K."""
         terms = list(dict.fromkeys(_terms(" ".join(state.active_values()))))[:40]
         if not terms: return []
         expression = " OR ".join(f'"{term}"' for term in terms)
@@ -239,6 +247,7 @@ class Agent:
 
     @staticmethod
     def _question_message(attribute: str | None, route: str) -> str:
+        """Turn the selected structured attribute into customer-facing English."""
         if not attribute:
             return "Here are the closest matches based on your current preferences."
         labels = {"feature": "feature", "use_case": "intended use", "budget": "budget", "color": "color", "material": "material", "size": "size", "style": "style", "brand": "brand"}
@@ -246,6 +255,7 @@ class Agent:
         return f"{prefix}, do you have a preference for {labels[attribute]}?"
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
+        """Return one protocol-compliant response for the current customer turn."""
         if session_id not in self.sessions: raise RuntimeError("reset must be called before respond")
         state = self.sessions[session_id]; self._extract(state, user_message or "", turn)
         prompt_tokens_before = state.llm_prompt_tokens

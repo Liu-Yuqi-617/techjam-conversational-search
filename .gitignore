@@ -50,6 +50,8 @@ results*.json
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
 secure/
+# The local evaluator is for development; the organizer runs its own harness.
+evaluator/
 # Internal provenance and release-audit working documents.
 docs/audits/
 docs/data_selection_audit.md

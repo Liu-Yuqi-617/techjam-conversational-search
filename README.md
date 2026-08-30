@@ -6,7 +6,7 @@ This project is a conversational shopping agent for the TechJam Conversational E
 
 The default submission is an offline, deterministic system built with Python's standard library and SQLite FTS5. It indexes the local product catalog in memory, extracts conversational slots such as category, colour, material, budget, and use case, retrieves a bounded lexical candidate set, and deterministically reranks candidates. The agent also keeps per-session state, handles explicit intent overrides, and asks one candidate-informed clarification question when it is useful.
 
-An optional local Ollama integration is available in `starter/llm.py`. It is disabled by default. When enabled, an LLM can assist only with dialogue planning: intent routing, soft slot completion, override detection, and clarification planning. It cannot access the catalog, hidden target, or generate ASINs. Invalid JSON, timeouts, unavailable services, and empty model responses immediately fall back to the offline rules.
+An optional local Ollama integration is available in `starter/llm.py`. It is disabled by default. When enabled, it can add only a literal, explicitly stated supplemental feature, style, brand, or use-case detail. Intent routing, overrides, catalog retrieval, ranking, and clarification remain deterministic. The model cannot access the catalog, hidden target, or generate ASINs. Invalid JSON, timeouts, unavailable services, and empty model responses immediately fall back to the offline rules.
 
 ### Public-set results
 
@@ -35,6 +35,10 @@ The latest retained improvement preserves the previous product category as a sof
 - The released public set at `data/public_set.jsonl`
 
 The default agent has no third-party Python dependencies. It uses only the standard library and SQLite FTS5.
+
+The official submission entry point is `agent.py`, which exports `Agent` for
+the evaluation harness. The catalog and public development set are supplied
+separately and are intentionally not committed to this repository.
 
 ### Create a virtual environment
 
@@ -92,6 +96,19 @@ timeout short so the agent can fall back to the deterministic path instead of
 delaying the full evaluation.
 
 ## Reproducing results
+
+### Official harness entry point
+
+The official harness should import the submission with:
+
+```python
+from agent import Agent
+```
+
+The required interface is `Agent.reset(session_id, user_profile)` followed by
+`Agent.respond(session_id, user_message, turn, top_k)`. The default path has
+no required environment variables, network access, API key, or third-party
+dependency.
 
 Run the regression suite:
 
@@ -156,9 +173,12 @@ The project intentionally keeps the offline SQLite path as the required baseline
 starter/agent.py                  dialogue state, FTS5 retrieval, reranking, clarification
 starter/state.py                  session and slot state
 starter/llm.py                    optional Ollama JSON planner and safe fallback
-evaluator/local_evaluator.py      local public-set simulator and scorer
+agent.py                           official harness entry point exporting Agent
+requirements.txt                   no-third-party-dependency declaration
+evaluator/                         local validation only; exclude from the final submission package
 tests/                            regression and evaluator tests
 docs/final_config.json            frozen configuration
+FINAL_RESULTS_REPORT.md            model, token, limitation, and reproduction disclosure
 ITERATION_7_10_REPORT.md          LLM, freeze, and compliance record
 ITERATION_11_RETRIEVAL_REPORT.md  retrieval and override experiment record
 ```
@@ -167,6 +187,9 @@ ITERATION_11_RETRIEVAL_REPORT.md  retrieval and override experiment record
 
 - Do not modify the evaluator, public labels, or catalog when reporting results.
 - Do not commit the catalog, public set, result files, local virtual environment, credentials, or API keys.
+- For a submission-only GitHub repository, include `agent.py`, `starter/`,
+  `README.md`, `requirements.txt`, `.env.example`, and the final report; do
+  not include `evaluator/`, `data/`, or locally generated result artifacts.
 - The default configuration has no network dependency, API key, model cost, or model token usage.
 - If an optional LLM is enabled, record its provider, model/version, tokens, latency, resource usage, failure rate, network requirement, and estimated cost before retaining it.
 - See [DATA_ATTRIBUTION.md](DATA_ATTRIBUTION.md) for catalog provenance and redistribution requirements.

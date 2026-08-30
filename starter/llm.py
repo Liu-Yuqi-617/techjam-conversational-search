@@ -49,6 +49,8 @@ state; copy that phrase exactly. Never infer preferences. Usually return
 
 @dataclass(frozen=True)
 class PlannerResult:
+    """Validated local-model output plus observability data for one request."""
+
     payload: dict[str, Any] | None
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -68,9 +70,11 @@ class OllamaPlanner:
 
     @property
     def available(self) -> bool:
+        """Return whether an explicitly enabled planner also has a model name."""
         return self.enabled and bool(self.model)
 
     def plan(self, message: str, state: dict[str, Any]) -> PlannerResult:
+        """Request a constrained JSON supplement without blocking offline retrieval."""
         if not self.available:
             return PlannerResult(None, failure="disabled")
         body = {
@@ -110,6 +114,7 @@ class OllamaPlanner:
 
     @staticmethod
     def _validate(value: Any) -> dict[str, Any] | None:
+        """Reject malformed model output and retain only schema-approved fields."""
         if not isinstance(value, dict) or set(value) - {"intent", "override", "slots", "ask_attribute"}:
             return None
         result: dict[str, Any] = {}
