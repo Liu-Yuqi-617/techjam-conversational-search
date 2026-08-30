@@ -8,17 +8,21 @@ The default submission is an offline, deterministic system built with Python's s
 
 An optional local Ollama integration is available in `starter/llm.py`. It is disabled by default. When enabled, an LLM can assist only with dialogue planning: intent routing, soft slot completion, override detection, and clarification planning. It cannot access the catalog, hidden target, or generate ASINs. Invalid JSON, timeouts, unavailable services, and empty model responses immediately fall back to the offline rules.
 
-### Current public-set result
+### Public-set results
 
-The retained configuration was evaluated on the frozen 200-session public set.
+Both result artifacts were evaluated on the frozen 200-session public set. The
+offline configuration is the submission baseline: it is deterministic and was
+re-run against the current checkout, reproducing every summary metric and all
+200 session records in `results.offline_final.json`.
 
-| Metric | Result |
-|---|---:|
-| HitRate@10 | 0.575000 |
-| MRR | 0.406877 |
-| MTTC | 7.125000 |
-| Technical Score | 0.487063 |
-| Default model token usage | 0 |
+| Configuration / artifact | HitRate@10 | MRR | MTTC | Technical Score | Tokens |
+|---|---:|---:|---:|---:|---:|
+| Offline deterministic — `results.offline_final.json` | 0.575000 | 0.406877 | 7.125000 | 0.487063 | 0 |
+| Qwen3:1.7b literal supplement — `results.qwen3-1.7b.literal-supplement.200.json` | 0.620000 | 0.387756 | 6.625000 | 0.513827 | 273,432 |
+
+The Qwen result is an optional local experiment, not the default submission.
+It uses the model only to add literal, explicitly stated supplemental details;
+retrieval, ranking, intent routing, and override handling remain rule-based.
 
 The latest retained improvement preserves the previous product category as a soft hint when the user changes only an attribute, for example: `I need blue shoes` followed by `Actually, I need black instead.` The complete comparison is in [ITERATION_11_RETRIEVAL_REPORT.md](ITERATION_11_RETRIEVAL_REPORT.md).
 
@@ -80,10 +84,12 @@ Enable the optional planner only in the current PowerShell session:
 $env:SHOPPING_LLM_ENABLED='1'
 $env:SHOPPING_LLM_MODEL='qwen3:1.7b'
 $env:OLLAMA_HOST='http://127.0.0.1:11434'
-$env:SHOPPING_LLM_TIMEOUT_SECONDS='0.5'
+$env:SHOPPING_LLM_TIMEOUT_SECONDS='1.5'
 ```
 
-The timeout applies to each model request. For a slow local model, keep the timeout short so the agent can fall back to the deterministic path instead of delaying the full evaluation.
+The timeout applies to each model request. For a slow local model, keep the
+timeout short so the agent can fall back to the deterministic path instead of
+delaying the full evaluation.
 
 ## Reproducing results
 
@@ -93,25 +99,44 @@ Run the regression suite:
 .\.venv\bin\python.exe -m unittest discover -s tests -v
 ```
 
-Run the default offline public-set evaluation:
+Run the deterministic offline baseline. Explicitly disabling the optional
+planner makes this independent of the machine's existing environment:
 
 ```powershell
-.\.venv\bin\python.exe -m evaluator.local_evaluator --output results.json
+$env:SHOPPING_LLM_ENABLED='0'
+.\.venv\bin\python.exe -m evaluator.local_evaluator --output results.repro_offline_final.json
 ```
 
-The command writes the overall metrics, per-scenario metrics, per-session rankings, and token totals to `results.json`. Use a different filename to preserve separate experiments:
+It must produce the following summary values: `sample_count=200`,
+`hit_rate_at_10=0.575`, `mrr=0.406877`, `mttc=7.125`,
+`efficiency=0.3875`, `recommended_technical_score=0.487063`, and zero model
+tokens. Compare the full result with the retained artifact:
 
 ```powershell
-.\.venv\bin\python.exe -m evaluator.local_evaluator --output results.offline_run1.json
+$expected = Get-Content results.offline_final.json -Raw | ConvertFrom-Json
+$actual = Get-Content results.repro_offline_final.json -Raw | ConvertFrom-Json
+Compare-Object ($expected.sessions | ConvertTo-Json -Depth 8 -Compress) ($actual.sessions | ConvertTo-Json -Depth 8 -Compress)
 ```
 
-To reproduce an LLM-on experiment after setting the Ollama environment variables above:
+`Compare-Object` emits no output when all 200 session records match. The
+catalog used for the verified run has SHA-256
+`DA979B05A68AF864CB0DCF9EE6A81C010C7E66A57978AD286C7A2E005FC69A67`.
+
+To reproduce the recorded literal-supplement experiment, install the same
+`qwen3:1.7b` Ollama model, set the LLM environment variables above, and run:
 
 ```powershell
-.\.venv\bin\python.exe -m evaluator.local_evaluator --output results.llm_on.json
+.\.venv\bin\python.exe -m evaluator.local_evaluator --output results.qwen3-1.7b.literal-supplement.200.repro.json
 ```
 
-Compare the resulting `recommended_technical_score` against the default offline reference of `0.487063`. Only retain an LLM configuration if it produces a stable improvement and acceptable latency. The final frozen configuration is documented in [docs/final_config.json](docs/final_config.json).
+The recorded target is `0.513827` technical score with 261,780 prompt tokens
+and 11,652 completion tokens. This experiment is only comparable when the
+Ollama runtime and model build are the same: local-model responses can differ
+between model digests or runtime versions even at temperature zero. Record
+`ollama list`, the model digest, hardware, and any fallbacks alongside a new
+run; do not replace the retained artifact merely because a different local
+runtime produces a different result. The final frozen offline configuration is
+documented in [docs/final_config.json](docs/final_config.json).
 
 ## Limitations and future improvements
 
